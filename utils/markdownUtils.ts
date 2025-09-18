@@ -56,22 +56,32 @@ export function parseMarkdown(content: string, entityName: string): ParsedMarkdo
       observations.push(trimmed.substring(2));
     }
     
-    // Extract relations (Obsidian links)
+    // Extract relations - support both old and new formats
     if (inRelations && (trimmed.startsWith('- ') || trimmed.startsWith('* '))) {
-      const linkMatch = trimmed.match(/\[\[([^:\]]+)(?:::([^\]]+))?\]\]/);
-      if (linkMatch) {
-        if (linkMatch[2]) {
-          // Format: [[relationType::target]]
-          relations.push({
-            to: linkMatch[2],
-            relationType: linkMatch[1]
-          });
-        } else {
-          // Format: [[target]] - default relation type
-          relations.push({
-            to: linkMatch[1],
-            relationType: 'related_to'
-          });
+      // Try new format first: - `relation_type`: [[target]]
+      let relationMatch = trimmed.match(/^[*-]\s*`([^`]+)`:\s*\[\[([^\]]+)\]\]/);
+      if (relationMatch) {
+        relations.push({
+          relationType: relationMatch[1],
+          to: relationMatch[2]
+        });
+      } else {
+        // Fallback to old broken format for backward compatibility: [[relationType::target]]
+        const linkMatch = trimmed.match(/\[\[([^:\]]+)(?:::([^\]]+))?\]\]/);
+        if (linkMatch) {
+          if (linkMatch[2]) {
+            // Format: [[relationType::target]]
+            relations.push({
+              to: linkMatch[2],
+              relationType: linkMatch[1]
+            });
+          } else {
+            // Format: [[target]] - default relation type
+            relations.push({
+              to: linkMatch[1],
+              relationType: 'related_to'
+            });
+          }
         }
       }
     }
@@ -136,7 +146,8 @@ export function generateMarkdown(entity: Entity, relations: Relation[]): string 
   if (entityRelations.length > 0) {
     content += `## Relations\n`;
     for (const relation of entityRelations) {
-      content += `- [[${relation.relationType}::${relation.to}]]\n`;
+      // Use backticks for relation type and proper Obsidian links
+      content += `- \`${relation.relationType}\`: [[${relation.to}]]\n`;
     }
     content += '\n';
   }
@@ -178,7 +189,8 @@ export function addRelationToContent(content: string, relation: Relation): strin
     }
   }
   
-  const newRelationLine = `- [[${relation.relationType}::${relation.to}]]`;
+  // Use the new format with backticks
+  const newRelationLine = `- \`${relation.relationType}\`: [[${relation.to}]]`;
   
   if (relationsIndex === -1) {
     // No Relations section exists, create one
@@ -200,12 +212,24 @@ export function addRelationToContent(content: string, relation: Relation): strin
  * Remove a relation link from the content
  */
 export function removeRelationFromContent(content: string, relation: Relation): string {
-  const linkPattern = new RegExp(
-    `^[\\s\\-\\*]*\\[\\[${escapeRegExp(relation.relationType)}::${escapeRegExp(relation.to)}\\]\\]\\s*$`,
+  // Try to remove new format first: - `relationType`: [[target]]
+  const newFormatPattern = new RegExp(
+    `^[\\s\\-\\*]*\\\`${escapeRegExp(relation.relationType)}\\\`:\\s*\\[\\[${escapeRegExp(relation.to)}\\]\\]\\s*$`,
     'gm'
   );
   
-  return content.replace(linkPattern, '');
+  let result = content.replace(newFormatPattern, '');
+  
+  // If nothing changed, try removing old format: [[relationType::target]]
+  if (result === content) {
+    const oldFormatPattern = new RegExp(
+      `^[\\s\\-\\*]*\\[\\[${escapeRegExp(relation.relationType)}::${escapeRegExp(relation.to)}\\]\\]\\s*$`,
+      'gm'
+    );
+    result = content.replace(oldFormatPattern, '');
+  }
+  
+  return result;
 }
 
 function escapeRegExp(string: string): string {
