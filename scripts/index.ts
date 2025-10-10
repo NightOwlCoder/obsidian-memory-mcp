@@ -8,7 +8,7 @@ import { VectorStorage } from '../storage/VectorStorage.js';
 import { parseMarkdown } from '../utils/markdownUtils.js';
 import { getEntityNameFromPath } from '../utils/pathUtils.js';
 import { chunkText, getChunkStats } from '../utils/chunker.js';
-import { chunkWithDocling } from '../utils/doclingChunker.js';
+import { chunkWithDocling, chunkImageWithDocling } from '../utils/doclingChunker.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -88,34 +88,162 @@ async function indexFile(
     } else {
       // VAULT NOTE: Docling HybridChunker for structure-aware chunking
       try {
-        const doclingChunks = await chunkWithDocling(filePath, 512);
+        // STEP 1: Pre-process markdown to inject OCR text inline
+        let processedContent = content;
         
-        if (doclingChunks.length === 0) {
-          console.error(`⚠️  No chunks generated for: ${filePath}`);
-          return false;
+        // Match both standard markdown ![alt](path) and Obsidian wiki-style ![[path]]
+        const standardMatches = [...content.matchAll(/!\[([^\]]*)\]\(([^)]+)\)/g)];
+        const wikiMatches = [...content.matchAll(/!\[\[([^\]]+)\]\]/g)];
+        
+        // Combine matches with normalized structure
+        interface ImageMatch {
+          fullMatch: string;
+          imagePath: string;
+          matchIndex: number;
         }
-
-        // Extract parent folder name for ownership context
-        const parentFolder = path.basename(path.dirname(filePath));
-        const folderContext = parentFolder !== '.' && parentFolder !== 'tmp' 
-          ? `${parentFolder}'s ` 
-          : '';
-
-        // Store each chunk with contextualized content including folder ownership
-        for (let i = 0; i < doclingChunks.length; i++) {
-          const contentWithContext = folderContext 
-            ? `${folderContext}${doclingChunks[i].content}`
-            : doclingChunks[i].content;
+        
+        const allMatches: ImageMatch[] = [
+          ...standardMatches.map(m => ({
+            fullMatch: m[0],
+            imagePath: m[2], // path is 2nd capture group
+            matchIndex: m.index!
+          })),
+          ...wikiMatches.map(m => ({
+            fullMatch: m[0],
+            imagePath: m[1], // path is 1st capture group
+            matchIndex: m.index!
+          }))
+        ].sort((a, b) => b.matchIndex - a.matchIndex); // Sort reverse for string replacement
+        
+        if (allMatches.length > 0) {
+          const fileDir = path.dirname(filePath);
+          const fileBasename = path.basename(filePath, '.md');
+          
+          console.error(`\n🖼️  Found ${allMatches.length} images in ${path.basename(filePath)}`);
+          
+          // Process images (already sorted in reverse order)
+          for (const imageMatch of allMatches) {
+            const { fullMatch, imagePath, matchIndex } = imageMatch;
+            console.error(`   Trying: ${imagePath}`);
             
-          await vectorStorage.storeChunk(
-            entityName,
-            filePath,
-            contentWithContext,
-            i,
-            doclingChunks.length,
-            'document',
-            []
-          );
+            // Skip URLs (http://, https://)
+            if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
+              continue;
+            }
+            
+            // Try multiple image resolution strategies
+            const imageName = path.basename(imagePath);
+            let absoluteImagePath: string | null = null;
+            
+            // Strategy 1: NEW Obsidian style (default) - <markdown_basename>_attachments/<image>
+            const attachmentsPath = path.join(fileDir, `${fileBasename}_attachments`, imageName);
+            try {
+              await fs.access(attachmentsPath);
+              absoluteImagePath = attachmentsPath;
+            } catch {}
+            
+            // Strategy 2: Relative path from markdown file
+            if (!absoluteImagePath) {
+              const relativePath = path.resolve(fileDir, imagePath);
+              try {
+                await fs.access(relativePath);
+                absoluteImagePath = relativePath;
+              } catch {}
+            }
+            
+            // Strategy 3: OLD Obsidian style - vault_root/media/<image>
+            if (!absoluteImagePath) {
+              // Find vault root by looking for .obsidian folder
+              let currentDir = fileDir;
+              let vaultRoot: string | null = null;
+              
+              for (let j = 0; j < 10; j++) {
+                try {
+                  await fs.access(path.join(currentDir, '.obsidian'));
+                  vaultRoot = currentDir;
+                  break;
+                } catch {}
+                const parentDir = path.dirname(currentDir);
+                if (parentDir === currentDir) break;
+                currentDir = parentDir;
+              }
+              
+              if (vaultRoot) {
+                const mediaPath = path.join(vaultRoot, 'media', imageName);
+                try {
+                  await fs.access(mediaPath);
+                  absoluteImagePath = mediaPath;
+                } catch {}
+              }
+            }
+            
+            if (!absoluteImagePath) {
+              console.error(`⚠️  Image not found (tried 3 strategies): ${imagePath} in ${filePath}`);
+              continue;
+            }
+            
+            try {
+              // OCR the image
+              const imageChunks = await chunkImageWithDocling(absoluteImagePath, 512);
+              
+              if (imageChunks.length > 0) {
+                // Extract OCR text and inject inline
+                const ocrText = imageChunks.map(chunk => chunk.content).join(' ');
+                const replacement = `\n[Image OCR: ${ocrText}]\n`;
+                
+                // Replace image reference with OCR text
+                processedContent = 
+                  processedContent.slice(0, matchIndex) + 
+                  replacement + 
+                  processedContent.slice(matchIndex + fullMatch.length);
+              }
+            } catch (imageError) {
+              console.error(`⚠️  Could not OCR image ${imagePath} in ${filePath}:`, imageError);
+            }
+          }
+        }
+        
+        // STEP 2: Write processed content to temp file for Docling
+        // Use suffix to avoid confusing Docling's format detection
+        const tmpFile = filePath.replace(/\.md$/, '_ocr_temp.md');
+        await fs.writeFile(tmpFile, processedContent, 'utf-8');
+        
+        try {
+          // STEP 3: Chunk with Docling using processed content
+          const doclingChunks = await chunkWithDocling(tmpFile, 512);
+          
+          if (doclingChunks.length === 0) {
+            console.error(`⚠️  No chunks generated for: ${filePath}`);
+            return false;
+          }
+
+          // Extract parent folder name for ownership context
+          const parentFolder = path.basename(path.dirname(filePath));
+          const folderContext = parentFolder !== '.' && parentFolder !== 'tmp' 
+            ? `${parentFolder}'s ` 
+            : '';
+
+          // Store each chunk with contextualized content including folder ownership
+          for (let i = 0; i < doclingChunks.length; i++) {
+            const contentWithContext = folderContext 
+              ? `${folderContext}${doclingChunks[i].content}`
+              : doclingChunks[i].content;
+              
+            await vectorStorage.storeChunk(
+              entityName,
+              filePath,
+              contentWithContext,
+              i,
+              doclingChunks.length,
+              'document',
+              []
+            );
+          }
+        } finally {
+          // Clean up temp file
+          try {
+            await fs.unlink(tmpFile);
+          } catch {}
         }
       } catch (error) {
         // Fallback to simple chunking if Docling fails
