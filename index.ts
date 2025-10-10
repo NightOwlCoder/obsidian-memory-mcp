@@ -15,7 +15,7 @@ const storageManager = new MarkdownStorageManager();
 
 // The server instance and tools exposed to Claude
 const server = new Server({
-  name: "memory-server",
+  name: "obsidian-memory-server",
   version: "0.6.3",
 },    {
     capabilities: {
@@ -172,11 +172,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "search_nodes",
-        description: "Search for nodes in the knowledge graph based on a query",
+        description: "Search for nodes in the knowledge graph based on a query. Returns limited results with metadata about total matches.",
         inputSchema: {
           type: "object",
           properties: {
             query: { type: "string", description: "The search query to match against entity names, types, and observation content" },
+            maxResults: { type: "number", description: "Maximum number of items to return for all arrays (default: 20)", default: 20 },
+            includeFields: { 
+              type: "array", 
+              items: { type: "string", enum: ["observations", "relations", "relatedEntities", "mentionMatches", "categories"] },
+              description: "Fields to include in response. Omit fields to reduce token usage.",
+              default: ["observations", "relations"]
+            },
           },
           required: ["query"],
         },
@@ -226,7 +233,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "read_graph":
       return { content: [{ type: "text", text: JSON.stringify(await storageManager.readGraph(), null, 2) }] };
     case "search_nodes":
-      return { content: [{ type: "text", text: JSON.stringify(await storageManager.searchNodes(args.query as string), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await storageManager.searchNodes(args.query as string, {
+        maxResults: args.maxResults as number || 20,
+        includeFields: args.includeFields as string[] || ["observations", "relations"]
+      }), null, 2) }] };
     case "open_nodes":
       return { content: [{ type: "text", text: JSON.stringify(await storageManager.openNodes(args.names as string[]), null, 2) }] };
     default:
@@ -237,7 +247,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Knowledge Graph MCP Server running on stdio (storage: markdown)");
+  console.error("Obsidian Memory MCP Server running on stdio (storage: markdown files)");
+  console.error(`MCP cwd: ${process.cwd()}`);
 }
 
 main().catch((error) => {

@@ -14,12 +14,15 @@ import {
   addRelationToContent,
   removeRelationFromContent
 } from '../utils/markdownUtils.js';
+import { VectorStorage } from './VectorStorage.js';
 
 export class MarkdownStorageManager {
   private memoryDir: string;
+  private vectorStorage: VectorStorage;
 
   constructor() {
     this.memoryDir = getMemoryDir();
+    this.vectorStorage = new VectorStorage();
   }
 
   /**
@@ -52,22 +55,83 @@ export class MarkdownStorageManager {
       if (error instanceof Error && 'code' in error && (error as any).code === 'ENOENT') {
         return null;
       }
+      // Skip files with YAML parsing errors (templates, malformed frontmatter)
+      if (error instanceof Error && error.message.includes('YAML')) {
+        console.error(`Skipping file with YAML error: ${filePath}`);
+        return null;
+      }
       throw error;
     }
   }
 
   /**
-   * Load all entities from the memory directory
+   * Recursively get all markdown files from a directory
+   */
+  private async getAllMarkdownFiles(dir: string): Promise<string[]> {
+    const files: string[] = [];
+    
+    async function scan(currentDir: string) {
+      try {
+        const entries = await fs.readdir(currentDir, { withFileTypes: true });
+        
+        for (const entry of entries) {
+          const fullPath = path.join(currentDir, entry.name);
+          
+          // Skip hidden and system directories
+          if (entry.name.startsWith('.') || 
+              entry.name === 'node_modules' || 
+              entry.name === 'venv') {
+            continue;
+          }
+          
+          if (entry.isDirectory()) {
+            await scan(fullPath);
+          } else if (entry.isFile() && entry.name.endsWith('.md')) {
+            files.push(fullPath);
+          }
+        }
+      } catch (error) {
+        // Skip directories we can't read
+      }
+    }
+    
+    await scan(dir);
+    return files;
+  }
+
+  /**
+   * Load all entities from both vaults (for reading)
    */
   private async loadAllEntities(): Promise<Entity[]> {
     await this.ensureMemoryDir();
     
     try {
-      const files = await fs.readdir(this.memoryDir);
-      const mdFiles = files.filter(f => f.endsWith('.md'));
+      const vaultPersonal = process.env.VAULT_PERSONAL || '';
+      const vaultWork = process.env.VAULT_WORK || '';
+      
+      let allFiles: string[] = [];
+      
+      // Scan both vaults if configured
+      if (vaultPersonal) {
+        const personalFiles = await this.getAllMarkdownFiles(vaultPersonal);
+        allFiles = allFiles.concat(personalFiles);
+      }
+      
+      if (vaultWork) {
+        const workFiles = await this.getAllMarkdownFiles(vaultWork);
+        allFiles = allFiles.concat(workFiles);
+      }
+      
+      // Fallback to memory dir if no vaults configured
+      if (allFiles.length === 0) {
+        const files = await fs.readdir(this.memoryDir);
+        allFiles = files
+          .filter(f => f.endsWith('.md'))
+          .map(f => path.join(this.memoryDir, f));
+      }
       
       const entities = await Promise.all(
-        mdFiles.map(file => this.loadEntity(path.join(this.memoryDir, file)))
+        allFiles.map(file => this.loadEntity(file))
       );
       
       return entities.filter((e): e is Entity => e !== null);
@@ -330,30 +394,107 @@ export class MarkdownStorageManager {
   }
 
   /**
-   * Search nodes based on query
+   * Search nodes using RAG-powered semantic search
+   * Supports: semantic similarity, multiple sort strategies, date filtering
    */
-  async searchNodes(query: string): Promise<KnowledgeGraph> {
-    const graph = await this.loadGraph();
-    const queryLower = query.toLowerCase();
+  async searchNodes(query: string, options?: {
+    maxResults?: number;
+    includeFields?: string[];
+    sortBy?: 'relevance' | 'modified' | 'created' | 'relevance+recency';
+    dateFilter?: {
+      after?: string;
+      before?: string;
+    };
+    minSimilarity?: number;
+  }): Promise<{
+    entities: Entity[];
+    relations: Relation[];
+    metadata: {
+      totalMatches: number;
+      returnedCount: number;
+      hasMore: boolean;
+      query: string;
+      maxResults: number;
+      includedFields: string[];
+      searchType: string;
+      sortedBy?: string;
+      minSimilarity?: number;
+    };
+  }> {
+    // Handle old API: searchNodes(query, maxResults, includeFields)
+    let maxResults: number;
+    let includeFields: string[];
+    let sortBy: 'relevance' | 'modified' | 'created' | 'relevance+recency' | undefined;
+    let dateFilter: { after?: string; before?: string } | undefined;
+    let minSimilarity: number | undefined;
+
+    if (typeof options === 'number') {
+      // Old API: searchNodes(query, maxResults, includeFields)
+      maxResults = options;
+      includeFields = arguments[2] || ["observations", "relations"];
+      sortBy = undefined;
+      dateFilter = undefined;
+      minSimilarity = undefined;
+    } else {
+      // New API: searchNodes(query, options)
+      maxResults = options?.maxResults || 10;
+      includeFields = options?.includeFields || ["observations", "relations"];
+      sortBy = options?.sortBy;
+      dateFilter = options?.dateFilter;
+      minSimilarity = options?.minSimilarity;
+    }
+
+    // Use VectorStorage for RAG search - returns top N by similarity
+    const searchResults = await this.vectorStorage.search(query, {
+      maxResults: maxResults,
+      sortBy: sortBy || 'relevance',
+      dateFilter
+    });
+
+    // Use chunk content directly from search results (don't reload files)
+    const entities: Entity[] = [];
     
-    // Filter entities
-    const filteredEntities = graph.entities.filter(e => 
-      e.name.toLowerCase().includes(queryLower) ||
-      e.entityType.toLowerCase().includes(queryLower) ||
-      e.observations.some(o => o.toLowerCase().includes(queryLower))
-    );
+    for (const result of searchResults) {
+      // Create entity from chunk content directly
+      const entity: Entity = {
+        name: result.entityName,
+        entityType: result.entityType || 'unknown',
+        observations: includeFields.includes("observations") ? [result.content] : []
+      };
+      
+      // Add similarity score
+      (entity as any).similarity = result.similarity;
+      
+      entities.push(entity);
+    }
     
-    // Get filtered entity names
-    const filteredEntityNames = new Set(filteredEntities.map(e => e.name));
+    // Get entity names
+    const entityNames = new Set(entities.map(e => e.name));
     
-    // Filter relations to only include those between filtered entities
-    const filteredRelations = graph.relations.filter(r => 
-      filteredEntityNames.has(r.from) && filteredEntityNames.has(r.to)
-    );
-    
+    // Load relations only for matched entities (from memory dir only)
+    let filteredRelations: Relation[] = [];
+    if (includeFields.includes("relations")) {
+      // Load relations from memory dir only (structured entities have relations)
+      const allRelations = await this.loadAllRelations();
+      filteredRelations = allRelations
+        .filter(r => entityNames.has(r.from) || entityNames.has(r.to))
+        .slice(0, maxResults);
+    }
+
     return {
-      entities: filteredEntities,
-      relations: filteredRelations
+      entities: entities,
+      relations: filteredRelations,
+      metadata: {
+        totalMatches: searchResults.length,
+        returnedCount: entities.length,
+        hasMore: searchResults.length > maxResults,
+        query,
+        maxResults,
+        includedFields: includeFields,
+        searchType: 'semantic',
+        sortedBy: sortBy,
+        minSimilarity
+      }
     };
   }
 

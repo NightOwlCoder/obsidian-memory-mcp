@@ -14,6 +14,7 @@ interface ParsedMarkdown {
   relations: Array<{
     to: string;
     relationType: string;
+    category?: string;
   }>;
 }
 
@@ -26,7 +27,7 @@ export function parseMarkdown(content: string, entityName: string): ParsedMarkdo
   
   // Extract observations from the content
   const observations: string[] = [];
-  const relations: Array<{ to: string; relationType: string }> = [];
+  const relations: Array<{ to: string; relationType: string; category?: string }> = [];
   
   // Split content into lines for processing
   const lines = parsed.content.split('\n');
@@ -56,51 +57,15 @@ export function parseMarkdown(content: string, entityName: string): ParsedMarkdo
       observations.push(trimmed.substring(2));
     }
     
-    // Extract relations - support both old and new formats
+    // Extract relations - standardized format: - `relation_type` (category): [[target]]
     if (inRelations && (trimmed.startsWith('- ') || trimmed.startsWith('* '))) {
-      // Try new format first: - `relation_type`: [[target]]
-      let relationMatch = trimmed.match(/^[*-]\s*`([^`]+)`:\s*\[\[([^\]]+)\]\]/);
+      const relationMatch = trimmed.match(/^[*-]\s*`([^`]+)`\s*\(([^)]+)\):\s*\[\[([^\]]+)\]\]/);
       if (relationMatch) {
         relations.push({
           relationType: relationMatch[1],
-          to: relationMatch[2]
+          category: relationMatch[2],
+          to: relationMatch[3]
         });
-      } else {
-        // Fallback to old broken format for backward compatibility: [[relationType::target]]
-        const linkMatch = trimmed.match(/\[\[([^:\]]+)(?:::([^\]]+))?\]\]/);
-        if (linkMatch) {
-          if (linkMatch[2]) {
-            // Format: [[relationType::target]]
-            relations.push({
-              to: linkMatch[2],
-              relationType: linkMatch[1]
-            });
-          } else {
-            // Format: [[target]] - default relation type
-            relations.push({
-              to: linkMatch[1],
-              relationType: 'related_to'
-            });
-          }
-        }
-      }
-    }
-    
-    // Also check for inline links anywhere in the content
-    const inlineLinks = trimmed.matchAll(/\[\[([^:\]]+)(?:::([^\]]+))?\]\]/g);
-    for (const match of inlineLinks) {
-      if (!inRelations) { // Avoid duplicates from the Relations section
-        if (match[2]) {
-          relations.push({
-            to: match[2],
-            relationType: match[1]
-          });
-        } else {
-          relations.push({
-            to: match[1],
-            relationType: 'mentioned_in'
-          });
-        }
       }
     }
   }

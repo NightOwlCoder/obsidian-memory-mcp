@@ -15,7 +15,9 @@
         "index.ts",
         "types.ts",
         "utils/**/*.ts",
-        "storage/**/*.ts"
+        "storage/**/*.ts",
+        "scripts/**/*.ts",
+        "watcher/**/*.ts"
     ],
     "exclude": [
         "node_modules"

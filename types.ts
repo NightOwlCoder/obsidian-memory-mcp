@@ -8,6 +8,7 @@ export interface Relation {
   from: string;
   to: string;
   relationType: string;
+  category?: string;
 }
 
 export interface KnowledgeGraph {
