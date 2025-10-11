@@ -169,15 +169,15 @@ async function indexFile(
             let imageName = path.basename(imagePath);
             imageName = imageName.split('|')[0]; // image.png|500 → image.png
             
-            console.error(`   Trying: ${imageName}`);
-            
             // Use vault-wide file map lookup (handles any organization structure)
             const absoluteImagePath = imageMap.get(imageName);
             
             if (!absoluteImagePath) {
-              console.error(`⚠️  Image not found in vault: ${imageName}`);
+              console.error(`   ⚠️  Not found: ${imageName}`);
               continue;
             }
+            
+            console.error(`   ✓ OCR'ing: ${imageName}`);
             
             try {
               // OCR the image
