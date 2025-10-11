@@ -126,7 +126,6 @@ async function indexFile(
           // Process images (already sorted in reverse order)
           for (const imageMatch of allMatches) {
             const { fullMatch, imagePath, matchIndex } = imageMatch;
-            console.error(`   Trying: ${imagePath}`);
             
             // Skip URLs (http://, https://)
             if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
@@ -138,6 +137,8 @@ async function indexFile(
             
             // Strip Obsidian size specifier: image.png|500 → image.png
             imageName = imageName.split('|')[0];
+            
+            console.error(`   Trying: ${imageName}`);
             
             let absoluteImagePath: string | null = null;
             
