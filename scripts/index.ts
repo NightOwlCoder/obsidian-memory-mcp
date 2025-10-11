@@ -12,6 +12,7 @@ import { chunkWithDocling, chunkImageWithDocling } from '../utils/doclingChunker
 import { removeStopwords, eng, por } from 'stopword';
 import { promises as fs } from 'fs';
 import path from 'path';
+import os from 'os';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -201,8 +202,9 @@ async function indexFile(
         }
         
         // STEP 2: Write processed content to temp file for Docling
-        // Use suffix to avoid confusing Docling's format detection
-        const tmpFile = filePath.replace(/\.md$/, '_ocr_temp.md');
+        // Create unique temp directory in system temp location
+        const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'docling-'));
+        const tmpFile = path.join(tmpDir, path.basename(filePath));
         await fs.writeFile(tmpFile, processedContent, 'utf-8');
         
         try {
@@ -260,9 +262,9 @@ async function indexFile(
             );
           }
         } finally {
-          // Clean up temp file
+          // Clean up temp directory and file
           try {
-            await fs.unlink(tmpFile);
+            await fs.rm(tmpDir, { recursive: true, force: true });
           } catch {}
         }
       } catch (error) {
