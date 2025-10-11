@@ -489,7 +489,7 @@ async function indexDirectory(
     const mdFiles = await getAllMarkdownFiles(memoryDir);
     
     stats.total = mdFiles.length;
-    const validationInterval = Math.max(1, Math.floor(stats.total / 20));
+    const validationInterval = 10; // Validate every 10 files
     console.log(`Found ${stats.total} markdown files (validating every ${validationInterval} files)\n`);
 
     // Index files with progress and validation
