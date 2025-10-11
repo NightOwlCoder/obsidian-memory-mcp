@@ -128,6 +128,7 @@ def chunk_image(file_path: str, max_tokens: int = 512):
     from docling.datamodel.base_models import InputFormat
     from docling.document_converter import ImageFormatOption
     from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from PIL import Image
     
     # Validate file exists
     file_path_obj = Path(file_path).resolve()
@@ -135,6 +136,17 @@ def chunk_image(file_path: str, max_tokens: int = 512):
         raise FileNotFoundError(f"Image not found: {file_path}")
     if not file_path_obj.is_file():
         raise ValueError(f"Not a file: {file_path}")
+    
+    # Check image dimensions - skip tiny images (tracking pixels, etc.)
+    try:
+        with Image.open(file_path_obj) as img:
+            width, height = img.size
+            if width < 25 or height < 25:
+                print(f"⚠️  Skipping tiny image {file_path_obj.name}: {width}x{height} (minimum 25x25)", file=sys.stderr)
+                return []  # Return empty chunks for tiny images
+    except Exception as e:
+        print(f"⚠️  Could not read image dimensions for {file_path_obj.name}: {e}", file=sys.stderr)
+        # Continue anyway - let Docling handle it
     
     # Configure OCR with enhanced settings
     # Using EasyOCR (default) with explicit configuration for better accuracy
