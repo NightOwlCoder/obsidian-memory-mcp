@@ -25,10 +25,43 @@ interface IndexStats {
   errors: Array<{ file: string; error: string }>;
 }
 
+// Build filename → filepath map for entire vault (all file types)
+async function buildFileMap(rootDir: string): Promise<Map<string, string>> {
+  const fileMap = new Map<string, string>();
+  
+  async function scan(dir: string) {
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        
+        // Skip hidden and system directories
+        if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'venv') {
+          continue;
+        }
+        
+        if (entry.isDirectory()) {
+          await scan(fullPath);
+        } else if (entry.isFile() && !entry.name.endsWith('.md')) {
+          // Map all non-markdown files (images, PDFs, etc.)
+          fileMap.set(entry.name, fullPath);
+        }
+      }
+    } catch (error) {
+      // Silently skip inaccessible directories
+    }
+  }
+  
+  await scan(rootDir);
+  return fileMap;
+}
+
 async function indexFile(
   vectorStorage: VectorStorage,
   filePath: string,
-  indexingRoot: string
+  indexingRoot: string,
+  imageMap: Map<string, string>
 ): Promise<boolean> {
   try {
     const content = await fs.readFile(filePath, 'utf-8');
@@ -132,60 +165,17 @@ async function indexFile(
               continue;
             }
             
-            // Try multiple image resolution strategies
+            // Extract filename and strip Obsidian size specifier
             let imageName = path.basename(imagePath);
-            
-            // Strip Obsidian size specifier: image.png|500 → image.png
-            imageName = imageName.split('|')[0];
+            imageName = imageName.split('|')[0]; // image.png|500 → image.png
             
             console.error(`   Trying: ${imageName}`);
             
-            let absoluteImagePath: string | null = null;
-            
-            // Strategy 1: NEW Obsidian style (default) - <markdown_basename>_attachments/<image>
-            const attachmentsPath = path.join(fileDir, `${fileBasename}_attachments`, imageName);
-            try {
-              await fs.access(attachmentsPath);
-              absoluteImagePath = attachmentsPath;
-            } catch {}
-            
-            // Strategy 2: Relative path from markdown file
-            if (!absoluteImagePath) {
-              const relativePath = path.resolve(fileDir, imagePath);
-              try {
-                await fs.access(relativePath);
-                absoluteImagePath = relativePath;
-              } catch {}
-            }
-            
-            // Strategy 3: OLD Obsidian style - vault_root/media/<image>
-            if (!absoluteImagePath) {
-              // Find vault root by looking for .obsidian folder
-              let currentDir = fileDir;
-              let vaultRoot: string | null = null;
-              
-              for (let j = 0; j < 10; j++) {
-                try {
-                  await fs.access(path.join(currentDir, '.obsidian'));
-                  vaultRoot = currentDir;
-                  break;
-                } catch {}
-                const parentDir = path.dirname(currentDir);
-                if (parentDir === currentDir) break;
-                currentDir = parentDir;
-              }
-              
-              if (vaultRoot) {
-                const mediaPath = path.join(vaultRoot, 'media', imageName);
-                try {
-                  await fs.access(mediaPath);
-                  absoluteImagePath = mediaPath;
-                } catch {}
-              }
-            }
+            // Use vault-wide file map lookup (handles any organization structure)
+            const absoluteImagePath = imageMap.get(imageName);
             
             if (!absoluteImagePath) {
-              console.error(`⚠️  Image not found (tried 3 strategies): ${imagePath} in ${filePath}`);
+              console.error(`⚠️  Image not found in vault: ${imageName}`);
               continue;
             }
             
@@ -497,6 +487,11 @@ async function indexDirectory(
   const vectorStorage = new VectorStorage();
 
   try {
+    // Build file map for entire vault (for image/PDF/etc resolution)
+    console.log('Building file map...');
+    const fileMap = await buildFileMap(memoryDir);
+    console.log(`Mapped ${fileMap.size} non-markdown files`);
+    
     // Get all markdown files recursively
     console.log('Scanning for markdown files...');
     const mdFiles = await getAllMarkdownFiles(memoryDir);
@@ -509,7 +504,7 @@ async function indexDirectory(
     for (let i = 0; i < mdFiles.length; i++) {
       const filePath = mdFiles[i];
       
-      const success = await indexFile(vectorStorage, filePath, memoryDir);
+      const success = await indexFile(vectorStorage, filePath, memoryDir, fileMap);
       
       if (success) {
         stats.indexed++;
