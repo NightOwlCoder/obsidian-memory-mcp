@@ -26,7 +26,8 @@ interface IndexStats {
 
 async function indexFile(
   vectorStorage: VectorStorage,
-  filePath: string
+  filePath: string,
+  indexingRoot: string
 ): Promise<boolean> {
   try {
     const content = await fs.readFile(filePath, 'utf-8');
@@ -217,17 +218,40 @@ async function indexFile(
             return false;
           }
 
-          // Extract parent folder name for ownership context
-          const parentFolder = path.basename(path.dirname(filePath));
-          const folderContext = parentFolder !== '.' && parentFolder !== 'tmp' 
-            ? `${parentFolder}'s ` 
-            : '';
+          // Create breadcrumb path for context
+          // Find vault root by looking for .obsidian folder
+          let currentDir = path.dirname(filePath);
+          let vaultRoot: string | null = null;
+          
+          for (let j = 0; j < 10; j++) {
+            try {
+              await fs.access(path.join(currentDir, '.obsidian'));
+              vaultRoot = currentDir;
+              break;
+            } catch {}
+            const parentDir = path.dirname(currentDir);
+            if (parentDir === currentDir) break;
+            currentDir = parentDir;
+          }
+          
+          // Build breadcrumb: relative/path/to/file (without .md extension)
+          let breadcrumb = '';
+          if (vaultRoot) {
+            const vaultName = path.basename(vaultRoot);
+            const relativePath = path.relative(vaultRoot, filePath);
+            const pathWithoutExt = relativePath.replace(/\.md$/, '');
+            breadcrumb = `${vaultName}/${pathWithoutExt}: `;
+          } else {
+            // Fallback: include indexing root folder + relative path
+            const rootFolderName = path.basename(indexingRoot);
+            const relativePath = path.relative(indexingRoot, filePath);
+            const pathWithoutExt = relativePath.replace(/\.md$/, '');
+            breadcrumb = `${rootFolderName}/${pathWithoutExt}: `;
+          }
 
-          // Store each chunk with contextualized content including folder ownership
+          // Store each chunk with breadcrumb context
           for (let i = 0; i < doclingChunks.length; i++) {
-            const contentWithContext = folderContext 
-              ? `${folderContext}${doclingChunks[i].content}`
-              : doclingChunks[i].content;
+            const contentWithContext = `${breadcrumb}${doclingChunks[i].content}`;
               
             await vectorStorage.storeChunk(
               entityName,
@@ -276,84 +300,145 @@ async function validateSearch(
   vectorStorage: VectorStorage,
   indexedFiles: string[]
 ): Promise<void> {
-  try {
-    // Pick random file from indexed
-    const randomFile = indexedFiles[Math.floor(Math.random() * indexedFiles.length)];
-    const content = await fs.readFile(randomFile, 'utf-8');
-    const entityName = getEntityNameFromPath(randomFile);
-    
-    // Skip frontmatter and extract content words only
-    const lines = content.split('\n');
-    let inFrontmatter = false;
-    let inContent = false;
-    const contentLines: string[] = [];
-    
-    for (const line of lines) {
-      // Skip YAML frontmatter
-      if (line.trim() === '---') {
-        if (!inFrontmatter && !inContent) {
-          inFrontmatter = true;
-          continue;
-        } else if (inFrontmatter) {
-          inFrontmatter = false;
-          inContent = true;
-          continue;
+  const MAX_RETRIES = 5;
+  const crypto = await import('crypto');
+  
+  // Retry loop to find a file with sufficient words
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      // Pick random file from indexed
+      const randomFile = indexedFiles[Math.floor(Math.random() * indexedFiles.length)];
+      const content = await fs.readFile(randomFile, 'utf-8');
+      const entityName = getEntityNameFromPath(randomFile);
+      
+      let contentText = content;
+      let frontmatterTags: string[] = [];
+      
+      // Handle frontmatter: ONLY if file starts with ---
+      if (content.trimStart().startsWith('---')) {
+        const lines = content.split('\n');
+        let endIdx = -1;
+        
+        // Find closing ---
+        for (let i = 1; i < lines.length; i++) {
+          if (lines[i].trim() === '---') {
+            endIdx = i;
+            break;
+          }
+        }
+        
+        if (endIdx > 0) {
+          // Extract tags from frontmatter
+          const frontmatterLines = lines.slice(0, endIdx + 1);
+          let inTagsSection = false;
+          
+          for (const line of frontmatterLines) {
+            if (line.match(/^tags:/i)) {
+              inTagsSection = true;
+              // In YAML, tags: is just the key, values are on next lines with "- "
+            } else if (inTagsSection && line.trim().startsWith('- ')) {
+              // Multi-line tags array
+              const tag = line.trim().substring(2).trim();
+              if (tag) frontmatterTags.push(tag);
+            } else if (inTagsSection && !line.trim().startsWith('-')) {
+              inTagsSection = false;
+            }
+          }
+          
+          // Use content after frontmatter
+          contentText = lines.slice(endIdx + 1).join('\n');
         }
       }
       
-      // Skip frontmatter lines and metadata patterns
-      if (inFrontmatter) continue;
-      if (line.match(/^(entityType|created|updated|modified|tags):/i)) continue;
+      // Combine tags + content for word extraction
+      const fullText = [...frontmatterTags, contentText].join(' ');
       
-      // Collect actual content
-      if (inContent || (!inFrontmatter && line.trim())) {
-        contentLines.push(line);
+      // Remove HTML tags before word extraction (keep URLs)
+      const cleanedText = fullText.replace(/<[^>]+>/g, '');
+      
+      // Extract words - strip edge punctuation only, min 2 chars
+      const words = cleanedText
+        .split(/\s+/)
+        .map(w => w.replace(/^[^\w]+|[^\w]+$/g, '')) // Strip edge punctuation only
+        .filter(w => w.length >= 2); // Minimum 2 chars per word
+      
+      if (words.length < 3) {
+        if (attempt < MAX_RETRIES - 1) {
+          continue; // Try another file
+        }
+        console.log(`\n  🔍 Validation: skipped after ${MAX_RETRIES} attempts (insufficient words)`);
+        return;
       }
-    }
-    
-    // Extract words from content - preserve real consecutive sequences
-    const contentText = contentLines.join(' ');
-    const words = contentText
-      .split(/\s+/)
-      .map(w => w.replace(/[^\w]/g, '')) // Remove punctuation but keep word
-      .filter(w => w.length > 0); // Remove empty/pure-punctuation tokens
-    
-    if (words.length < 3) {
-      console.log(`\n  🔍 Validation: skipped (insufficient words) - ${entityName}`);
+      
+      // Add timestamp and filename entropy to randomization
+      const seed = Date.now() + randomFile.length + attempt;
+      
+      // Randomly select 1-3 consecutive words
+      const hash = crypto.createHash('sha256').update(String(seed)).digest();
+      const queryLength = 1 + (hash.readUInt8(0) % 3); // 1, 2, or 3 words
+      
+      if (words.length < queryLength) {
+        if (attempt < MAX_RETRIES - 1) {
+          continue; // Try another file
+        }
+        console.log(`\n  🔍 Validation: skipped after ${MAX_RETRIES} attempts (insufficient words for query)`);
+        return;
+      }
+      
+      const maxIdx = Math.max(0, words.length - queryLength);
+      
+      // Use hash of seed for better distribution
+      const randomValue = hash.readUInt32BE(0) / 0xFFFFFFFF; // 0 to 1
+      const startIdx = maxIdx > 0 ? Math.floor(randomValue * (maxIdx + 1)) : 0;
+      
+      const selectedWords = words.slice(startIdx, startIdx + queryLength);
+      const totalChars = selectedWords.join('').length;
+      
+      // Validate char count
+      // Multi-word: total chars > 4
+      if (queryLength > 1 && totalChars <= 4) {
+        if (attempt < MAX_RETRIES - 1) {
+          continue; // Try another file
+        }
+        console.log(`\n  🔍 Validation: skipped after ${MAX_RETRIES} attempts (query too short)`);
+        return;
+      }
+      
+      // Single-word: prefer 4+ chars, allow 3+ as fallback
+      if (queryLength === 1 && selectedWords[0].length < 3) {
+        if (attempt < MAX_RETRIES - 1) {
+          continue; // Try another file
+        }
+        console.log(`\n  🔍 Validation: skipped after ${MAX_RETRIES} attempts (single word too short)`);
+        return;
+      }
+      
+      const query = selectedWords.join(' ');
+      
+      // Search vector DB - get ALL results to check if file appears anywhere
+      const results = await vectorStorage.search(query, { maxResults: 100 });
+      
+      // Check if source file appears ANYWHERE in results
+      const match = results.find(r => r.filePath === randomFile);
+      const topSim = results[0]?.similarity || 0;
+      const totalResults = results.length;
+      
+      if (match) {
+        const rank = results.indexOf(match) + 1;
+        console.log(`  🔍 Validation: "${query}" → ${entityName} found ✓ (sim: ${match.similarity.toFixed(2)}, rank ${rank}/${totalResults})`);
+      } else {
+        console.log(`  ⚠️  Validation: "${query}" → ${entityName} NOT FOUND in ${totalResults} results (best sim: ${topSim.toFixed(2)})`);
+      }
+      
+      return; // Success - exit retry loop
+      
+    } catch (error) {
+      if (attempt < MAX_RETRIES - 1) {
+        continue; // Try another file
+      }
+      console.log(`\n  ⚠️  Validation failed after ${MAX_RETRIES} attempts: ${error}`);
       return;
     }
-    
-    // Add timestamp and filename entropy to randomization
-    const crypto = await import('crypto');
-    const seed = Date.now() + randomFile.length;
-    
-    // Randomly select 1-3 consecutive words
-    const hash = crypto.createHash('sha256').update(String(seed)).digest();
-    const queryLength = 1 + (hash.readUInt8(0) % 3); // 1, 2, or 3 words
-    const maxIdx = Math.max(0, words.length - queryLength);
-    
-    // Use hash of seed for better distribution
-    const randomValue = hash.readUInt32BE(0) / 0xFFFFFFFF; // 0 to 1
-    const startIdx = maxIdx > 0 ? Math.floor(randomValue * (maxIdx + 1)) : 0;
-    
-    const query = words.slice(startIdx, startIdx + queryLength).join(' ');
-    
-    // Search vector DB - get ALL results to check if file appears anywhere
-    const results = await vectorStorage.search(query, { maxResults: 100 });
-    
-    // Check if source file appears ANYWHERE in results
-    const match = results.find(r => r.filePath === randomFile);
-    const topSim = results[0]?.similarity || 0;
-    const totalResults = results.length;
-    
-    if (match) {
-      const rank = results.indexOf(match) + 1;
-      console.log(`  🔍 Validation: "${query}" → ${entityName} found ✓ (sim: ${match.similarity.toFixed(2)}, rank ${rank}/${totalResults})`);
-    } else {
-      console.log(`  ⚠️  Validation: "${query}" → ${entityName} NOT FOUND in ${totalResults} results (best sim: ${topSim.toFixed(2)})`);
-    }
-  } catch (error) {
-    console.log(`\n  ⚠️  Validation failed: ${error}`);
   }
 }
 
@@ -415,7 +500,7 @@ async function indexDirectory(
     for (let i = 0; i < mdFiles.length; i++) {
       const filePath = mdFiles[i];
       
-      const success = await indexFile(vectorStorage, filePath);
+      const success = await indexFile(vectorStorage, filePath, memoryDir);
       
       if (success) {
         stats.indexed++;
