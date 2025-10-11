@@ -23,6 +23,7 @@ interface IndexStats {
   indexed: number;
   skipped: number;
   failed: number;
+  warnings: number;
   errors: Array<{ file: string; error: string }>;
 }
 
@@ -62,7 +63,8 @@ async function indexFile(
   vectorStorage: VectorStorage,
   filePath: string,
   indexingRoot: string,
-  imageMap: Map<string, string>
+  imageMap: Map<string, string>,
+  stats: IndexStats
 ): Promise<boolean> {
   try {
     const content = await fs.readFile(filePath, 'utf-8');
@@ -149,7 +151,25 @@ async function indexFile(
             imagePath: m[1], // path is 1st capture group
             matchIndex: m.index!
           }))
-        ].sort((a, b) => b.matchIndex - a.matchIndex); // Sort reverse for string replacement
+        ]
+        // Filter out code patterns (regex backreferences, variables, encoded strings, etc.)
+        .filter(match => {
+          const path = match.imagePath.trim();
+          // Skip empty or whitespace-only
+          if (!path || path.length === 0) return false;
+          // Skip regex backreferences: $1, $2, $3, etc.
+          if (/^\$\d+$/.test(path)) return false;
+          // Skip template variables: ${var}, ${anything}
+          if (/^\$\{.*\}$/.test(path)) return false;
+          // Skip URL-encoded strings with %20 or other percent encoding
+          if (path.includes('%20') || path.includes('%3') || path.includes('%2')) return false;
+          // Skip data URIs: data:image/...
+          if (path.startsWith('data:')) return false;
+          // Skip base64-looking strings (long alphanumeric without extensions)
+          if (path.length > 30 && !/\.(png|jpg|jpeg|gif|webp|svg|pdf)$/i.test(path)) return false;
+          return true;
+        })
+        .sort((a, b) => b.matchIndex - a.matchIndex); // Sort reverse for string replacement
         
         if (allMatches.length > 0) {
           const fileDir = path.dirname(filePath);
@@ -175,6 +195,7 @@ async function indexFile(
             
             if (!absoluteImagePath) {
               console.error(`   ⚠️  Not found: ${imageName}`);
+              stats.warnings++;
               continue;
             }
             
@@ -197,6 +218,7 @@ async function indexFile(
               }
             } catch (imageError) {
               console.error(`⚠️  Could not OCR image ${imagePath} in ${filePath}:`, imageError);
+              stats.warnings++;
             }
           }
         }
@@ -473,6 +495,7 @@ async function indexDirectory(
     indexed: 0,
     skipped: 0,
     failed: 0,
+    warnings: 0,
     errors: []
   };
 
@@ -496,7 +519,7 @@ async function indexDirectory(
     for (let i = 0; i < mdFiles.length; i++) {
       const filePath = mdFiles[i];
       
-      const success = await indexFile(vectorStorage, filePath, memoryDir, fileMap);
+      const success = await indexFile(vectorStorage, filePath, memoryDir, fileMap, stats);
       
       if (success) {
         stats.indexed++;
@@ -583,10 +606,11 @@ Examples:
   console.log(`   Total files: ${stats.total}`);
   console.log(`   ✅ Indexed: ${stats.indexed}`);
   console.log(`   ⏭️  Skipped: ${stats.skipped}`);
+  console.log(`   ⚠️  Warnings: ${stats.warnings}`);
   console.log(`   ❌ Failed: ${stats.failed}`);
 
   if (stats.errors.length > 0) {
-    console.log('\n⚠️  Errors:');
+    console.log('\n❌ Errors:');
     stats.errors.forEach(({ file, error }) => {
       console.log(`   ${file}: ${error}`);
     });
