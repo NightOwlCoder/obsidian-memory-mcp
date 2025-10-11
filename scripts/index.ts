@@ -9,6 +9,7 @@ import { parseMarkdown } from '../utils/markdownUtils.js';
 import { getEntityNameFromPath } from '../utils/pathUtils.js';
 import { chunkText, getChunkStats } from '../utils/chunker.js';
 import { chunkWithDocling, chunkImageWithDocling } from '../utils/doclingChunker.js';
+import { removeStopwords, eng, por } from 'stopword';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -362,22 +363,25 @@ async function validateSearch(
         .map(w => w.replace(/^[^\w]+|[^\w]+$/g, '')) // Strip edge punctuation only
         .filter(w => w.length >= 2); // Minimum 2 chars per word
       
-      if (words.length < 3) {
+      // Filter stop words (English + Portuguese) for better query specificity
+      const meaningfulWords = removeStopwords(words, [...eng, ...por]);
+      
+      if (meaningfulWords.length < 3) {
         if (attempt < MAX_RETRIES - 1) {
           continue; // Try another file
         }
-        console.log(`\n  🔍 Validation: skipped after ${MAX_RETRIES} attempts (insufficient words)`);
+        console.log(`\n  🔍 Validation: skipped after ${MAX_RETRIES} attempts (insufficient meaningful words)`);
         return;
       }
       
       // Add timestamp and filename entropy to randomization
       const seed = Date.now() + randomFile.length + attempt;
       
-      // Randomly select 1-3 consecutive words
+      // Randomly select 1-3 consecutive words from meaningful words
       const hash = crypto.createHash('sha256').update(String(seed)).digest();
       const queryLength = 1 + (hash.readUInt8(0) % 3); // 1, 2, or 3 words
       
-      if (words.length < queryLength) {
+      if (meaningfulWords.length < queryLength) {
         if (attempt < MAX_RETRIES - 1) {
           continue; // Try another file
         }
@@ -385,13 +389,13 @@ async function validateSearch(
         return;
       }
       
-      const maxIdx = Math.max(0, words.length - queryLength);
+      const maxIdx = Math.max(0, meaningfulWords.length - queryLength);
       
       // Use hash of seed for better distribution
       const randomValue = hash.readUInt32BE(0) / 0xFFFFFFFF; // 0 to 1
       const startIdx = maxIdx > 0 ? Math.floor(randomValue * (maxIdx + 1)) : 0;
       
-      const selectedWords = words.slice(startIdx, startIdx + queryLength);
+      const selectedWords = meaningfulWords.slice(startIdx, startIdx + queryLength);
       const totalChars = selectedWords.join('').length;
       
       // Validate char count
