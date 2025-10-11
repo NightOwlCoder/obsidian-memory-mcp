@@ -134,7 +134,11 @@ async function indexFile(
             }
             
             // Try multiple image resolution strategies
-            const imageName = path.basename(imagePath);
+            let imageName = path.basename(imagePath);
+            
+            // Strip Obsidian size specifier: image.png|500 → image.png
+            imageName = imageName.split('|')[0];
+            
             let absoluteImagePath: string | null = null;
             
             // Strategy 1: NEW Obsidian style (default) - <markdown_basename>_attachments/<image>
