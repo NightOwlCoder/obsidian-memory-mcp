@@ -18,12 +18,12 @@ echo ""
 
 # 2. Index personal vault
 echo "📚 Indexing personal vault..."
-npm run index -- --memory-dir /Users/sibagy/fileZ/obsidian/pessoAll
+npm run index -- --memory-dir /Users/sibagy/fileZ/obsidian/personal
 echo ""
 
 # 3. Index work vault
 echo "💼 Indexing work vault..."
-npm run index -- --memory-dir /Users/sibagy/fileZ/obsidian/vault
+npm run index -- --memory-dir /Users/sibagy/fileZ/obsidian/work
 echo ""
 
 # 4. Show stats
