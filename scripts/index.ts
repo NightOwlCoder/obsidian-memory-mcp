@@ -374,9 +374,9 @@ async function validateSearch(
       // Add timestamp and filename entropy to randomization
       const seed = Date.now() + randomFile.length + attempt;
       
-      // Randomly select 1-3 consecutive words from meaningful words
+      // Randomly select 2-3 consecutive words from meaningful words (no single-word queries)
       const hash = crypto.createHash('sha256').update(String(seed)).digest();
-      const queryLength = 1 + (hash.readUInt8(0) % 3); // 1, 2, or 3 words
+      const queryLength = 2 + (hash.readUInt8(0) % 2); // 2 or 3 words only
       
       if (meaningfulWords.length < queryLength) {
         if (attempt < MAX_RETRIES - 1) {
@@ -395,22 +395,12 @@ async function validateSearch(
       const selectedWords = meaningfulWords.slice(startIdx, startIdx + queryLength);
       const totalChars = selectedWords.join('').length;
       
-      // Validate char count
-      // Multi-word: total chars > 4
-      if (queryLength > 1 && totalChars <= 4) {
+      // Validate char count - multi-word only now, total chars > 4
+      if (totalChars <= 4) {
         if (attempt < MAX_RETRIES - 1) {
           continue; // Try another file
         }
         console.log(`\n  🔍 Validation: skipped after ${MAX_RETRIES} attempts (query too short)`);
-        return;
-      }
-      
-      // Single-word: prefer 4+ chars, allow 3+ as fallback
-      if (queryLength === 1 && selectedWords[0].length < 3) {
-        if (attempt < MAX_RETRIES - 1) {
-          continue; // Try another file
-        }
-        console.log(`\n  🔍 Validation: skipped after ${MAX_RETRIES} attempts (single word too short)`);
         return;
       }
       
