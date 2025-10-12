@@ -1,30 +1,26 @@
 import chokidar, { FSWatcher } from 'chokidar';
 import { VectorStorage } from '../storage/VectorStorage.js';
-import { parseMarkdown } from '../utils/markdownUtils.js';
-import { getEntityNameFromPath } from '../utils/pathUtils.js';
-import { promises as fs } from 'fs';
-
-interface WatchHandlers {
-  onAdd?: (path: string) => void | Promise<void>;
-  onChange?: (path: string) => void | Promise<void>;
-  onDelete?: (path: string) => void | Promise<void>;
-}
+import { indexFile } from '../utils/indexingPipeline.js';
+import { daemonLogger as logger } from '../utils/logger.js';
+import path from 'path';
 
 export class FileWatcher {
   private watchers: Map<string, FSWatcher> = new Map();
   private vectorStorage: VectorStorage;
   private pendingUpdates: Map<string, NodeJS.Timeout> = new Map();
-  private debounceMs: number = 100;
+  private debounceMs: number;
 
   constructor(vectorStorage: VectorStorage) {
     this.vectorStorage = vectorStorage;
+    // Smart debounce: 60 seconds (typing settled detection)
+    this.debounceMs = parseInt(process.env.FILE_WATCH_DEBOUNCE_MS || '60000');
   }
 
   /**
    * Watch a vault directory for changes
    */
   watch(vaultPath: string): void {
-    console.error(`Starting watch on: ${vaultPath}`);
+    logger.info('Starting watch: ' + vaultPath);
 
     const watcher = chokidar.watch(vaultPath, {
       ignored: [
@@ -36,7 +32,7 @@ export class FileWatcher {
       persistent: true,
       ignoreInitial: true, // Don't trigger for existing files
       awaitWriteFinish: {
-        stabilityThreshold: this.debounceMs,
+        stabilityThreshold: 500,  // Wait 500ms for write to complete
         pollInterval: 50
       }
     });
@@ -45,8 +41,8 @@ export class FileWatcher {
       .on('add', (path) => this.handleAdd(path))
       .on('change', (path) => this.handleChange(path))
       .on('unlink', (path) => this.handleDelete(path))
-      .on('ready', () => console.error(`✓ Watching: ${vaultPath}`))
-      .on('error', (error) => console.error(`Watcher error: ${error}`));
+      .on('ready', () => logger.info('✓ Ready: ' + vaultPath))
+      .on('error', (error) => logger.error('Watcher error: ' + vaultPath, { error: String(error) }));
 
     this.watchers.set(vaultPath, watcher);
   }
@@ -66,8 +62,8 @@ export class FileWatcher {
   private async handleAdd(filePath: string): Promise<void> {
     if (!filePath.endsWith('.md')) return;
 
-    console.error(`File added: ${filePath}`);
-    await this.indexFile(filePath);
+    logger.info('File added: ' + path.basename(filePath));
+    await this.handleFileChange(filePath);
   }
 
   /**
@@ -76,15 +72,18 @@ export class FileWatcher {
   private async handleChange(filePath: string): Promise<void> {
     if (!filePath.endsWith('.md')) return;
 
-    // Debounce rapid changes
+    // Smart debounce: timer resets on each save (typing settled detection)
     const existing = this.pendingUpdates.get(filePath);
     if (existing) {
       clearTimeout(existing);
+      logger.debug('Timer reset: ' + path.basename(filePath) + ' (' + (this.debounceMs / 1000) + 's)');
+    } else {
+      logger.debug('Timer started: ' + path.basename(filePath) + ' (' + (this.debounceMs / 1000) + 's)');
     }
 
     const timeout = setTimeout(async () => {
-      console.error(`File changed: ${filePath}`);
-      await this.indexFile(filePath);
+      logger.info('Typing settled: ' + path.basename(filePath));
+      await this.handleFileChange(filePath);
       this.pendingUpdates.delete(filePath);
     }, this.debounceMs);
 
@@ -97,60 +96,44 @@ export class FileWatcher {
   private async handleDelete(filePath: string): Promise<void> {
     if (!filePath.endsWith('.md')) return;
 
-    console.error(`File deleted: ${filePath}`);
+    logger.warn('File deleted: ' + path.basename(filePath));
     
     try {
       await this.vectorStorage.delete(filePath);
+      logger.info('✓ Removed from vector DB: ' + path.basename(filePath));
     } catch (error) {
-      console.error(`Failed to delete ${filePath}:`, error);
+      logger.error('Failed to delete ' + path.basename(filePath), {
+        error: error instanceof Error ? error.message : String(error)
+      });
     }
   }
 
   /**
-   * Index a file: read, parse, embed, store
+   * Index or re-index a file using shared pipeline
    */
-  private async indexFile(filePath: string): Promise<void> {
-    try {
-      // Read file content
-      const content = await fs.readFile(filePath, 'utf-8');
-      
-      // Get entity name from file path
-      const entityName = getEntityNameFromPath(filePath);
-      if (!entityName) {
-        console.error(`Could not extract entity name from: ${filePath}`);
-        return;
-      }
-
-      // Parse markdown
-      const parsed = parseMarkdown(content, entityName);
-      
-      // Build full content for embedding (includes observations)
-      const fullContent = [
-        `# ${entityName}`,
-        `Type: ${parsed.metadata.entityType}`,
-        '',
-        '## Observations',
-        ...parsed.observations.map(obs => `- ${obs}`),
-        '',
-        '## Relations',
-        ...parsed.relations.map(rel => `- ${rel.relationType}: ${rel.to}`)
-      ].join('\n');
-
-      // Store in vector database
-      await this.vectorStorage.storeEntity(
-        entityName,
-        filePath,
-        fullContent,
-        parsed.metadata.entityType || 'unknown',
-        [], // tags (can extract from frontmatter later)
-        parsed.relations, // outgoing relations
-        null // incoming relations (will be computed later)
-      );
-
-      console.error(`✓ Indexed: ${entityName}`);
-    } catch (error) {
-      console.error(`Failed to index ${filePath}:`, error);
+  private async handleFileChange(filePath: string): Promise<void> {
+    const vaultRoot = this.getVaultRoot(filePath);
+    const success = await indexFile(this.vectorStorage, filePath, vaultRoot);
+    
+    if (success) {
+      logger.info('✓ Re-indexed: ' + path.basename(filePath));
+    } else {
+      logger.error('✗ Failed to re-index: ' + path.basename(filePath));
     }
+  }
+
+  /**
+   * Get vault root for a file path
+   */
+  private getVaultRoot(filePath: string): string {
+    // Find vault root by checking which watched path contains this file
+    for (const [vaultPath] of this.watchers) {
+      if (filePath.startsWith(vaultPath)) {
+        return vaultPath;
+      }
+    }
+    // Fallback: use file's parent directory
+    return path.dirname(filePath);
   }
 
   /**

@@ -29,6 +29,7 @@
     "prepare": "npm run build",
     "watch": "tsc --watch",
     "start": "node dist/index.js",
+    "daemon": "node dist/standalone-watcher.js",
     "index": "tsx scripts/index.ts",
     "stats": "tsx scripts/stats.ts",
     "reindex": "tsx scripts/index.ts --force"
@@ -39,7 +40,9 @@
     "chokidar": "^4.0.3",
     "gray-matter": "^4.0.3",
     "pg": "^8.16.3",
-    "stopword": "^3.1.1"
+    "stopword": "^3.1.1",
+    "winston": "^3.18.3",
+    "winston-daily-rotate-file": "^5.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.18.8",

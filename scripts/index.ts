@@ -1,18 +1,22 @@
 #!/usr/bin/env node
 /**
- * Index all markdown files from memory directory into vector database
+ * Batch indexer for Obsidian vault markdown files
+ * 
+ * Uses shared indexing pipeline with:
+ * - Observation-level chunking for memory entities
+ * - Docling HybridChunker for vault notes
+ * - Image OCR with inline injection
+ * 
  * Usage: tsx scripts/index.ts [--memory-dir path] [--force]
  */
 
 import { VectorStorage } from '../storage/VectorStorage.js';
-import { parseMarkdown } from '../utils/markdownUtils.js';
+import { indexFile } from '../utils/indexingPipeline.js';
+import { getAllMarkdownFiles, buildFileMap } from '../utils/fileMapBuilder.js';
 import { getEntityNameFromPath } from '../utils/pathUtils.js';
-import { chunkText, getChunkStats } from '../utils/chunker.js';
-import { chunkWithDocling, chunkImageWithDocling } from '../utils/doclingChunker.js';
 import { removeStopwords, eng, por } from 'stopword';
 import { promises as fs } from 'fs';
 import path from 'path';
-import os from 'os';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -25,300 +29,18 @@ interface IndexStats {
   failed: number;
   warnings: number;
   errors: Array<{ file: string; error: string }>;
+  validationAttempts: number;
+  validationSuccesses: number;
 }
 
-// Build filename → filepath map for entire vault (all file types)
-async function buildFileMap(rootDir: string): Promise<Map<string, string>> {
-  const fileMap = new Map<string, string>();
-  
-  async function scan(dir: string) {
-    try {
-      const entries = await fs.readdir(dir, { withFileTypes: true });
-      
-      for (const entry of entries) {
-        const fullPath = path.join(dir, entry.name);
-        
-        // Skip hidden and system directories
-        if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'venv') {
-          continue;
-        }
-        
-        if (entry.isDirectory()) {
-          await scan(fullPath);
-        } else if (entry.isFile() && !entry.name.endsWith('.md')) {
-          // Map all non-markdown files (images, PDFs, etc.)
-          fileMap.set(entry.name, fullPath);
-        }
-      }
-    } catch (error) {
-      // Silently skip inaccessible directories
-    }
-  }
-  
-  await scan(rootDir);
-  return fileMap;
-}
-
-async function indexFile(
-  vectorStorage: VectorStorage,
-  filePath: string,
-  indexingRoot: string,
-  imageMap: Map<string, string>,
-  stats: IndexStats
-): Promise<boolean> {
-  try {
-    const content = await fs.readFile(filePath, 'utf-8');
-    const entityName = getEntityNameFromPath(filePath);
-    
-    if (!entityName) {
-      console.error(`⚠️  Could not extract entity name from: ${filePath}`);
-      return false;
-    }
-
-    // Parse markdown
-    const parsed = parseMarkdown(content, entityName);
-    
-    // Determine file type
-    const isMemoryEntity = filePath.includes('/memory/');
-    
-    if (isMemoryEntity) {
-      // MEMORY ENTITY: Observation-level + Relation-level chunking
-      let chunkIndex = 0;
-      const totalChunks = parsed.observations.length + parsed.relations.length;
-      
-      // Skip if no content
-      if (totalChunks === 0) {
-        console.error(`⚠️  No observations or relations for: ${filePath}`);
-        return false;
-      }
-      
-      // Chunk each observation separately
-      for (const obs of parsed.observations) {
-        const chunkContent = `${entityName} (${parsed.metadata.entityType || 'unknown'}): ${obs}`;
-        await vectorStorage.storeChunk(
-          entityName,
-          filePath,
-          chunkContent,
-          chunkIndex++,
-          totalChunks,
-          parsed.metadata.entityType || 'unknown',
-          []
-        );
-      }
-      
-      // Chunk each relation separately with category
-      for (const relation of parsed.relations) {
-        // Extract category from markdown format: `type` (category): [[target]]
-        const category = relation.category || 'uncategorized';
-        const chunkContent = `${entityName} ${relation.relationType} ${relation.to} (${category})`;
-        
-        await vectorStorage.storeChunk(
-          entityName,
-          filePath,
-          chunkContent,
-          chunkIndex++,
-          totalChunks,
-          'relation',
-          [category]
-        );
-      }
-      
-    } else {
-      // VAULT NOTE: Docling HybridChunker for structure-aware chunking
-      try {
-        // STEP 1: Pre-process markdown to inject OCR text inline
-        let processedContent = content;
-        
-        // Match both standard markdown ![alt](path) and Obsidian wiki-style ![[path]]
-        const standardMatches = [...content.matchAll(/!\[([^\]]*)\]\(([^)]+)\)/g)];
-        const wikiMatches = [...content.matchAll(/!\[\[([^\]]+)\]\]/g)];
-        
-        // Combine matches with normalized structure
-        interface ImageMatch {
-          fullMatch: string;
-          imagePath: string;
-          matchIndex: number;
-        }
-        
-        const allMatches: ImageMatch[] = [
-          ...standardMatches.map(m => ({
-            fullMatch: m[0],
-            imagePath: m[2], // path is 2nd capture group
-            matchIndex: m.index!
-          })),
-          ...wikiMatches.map(m => ({
-            fullMatch: m[0],
-            imagePath: m[1], // path is 1st capture group
-            matchIndex: m.index!
-          }))
-        ]
-        // Filter out code patterns (regex backreferences, variables, encoded strings, etc.)
-        .filter(match => {
-          const path = match.imagePath.trim();
-          // Skip empty or whitespace-only
-          if (!path || path.length === 0) return false;
-          // Skip regex backreferences: $1, $2, $3, etc.
-          if (/^\$\d+$/.test(path)) return false;
-          // Skip template variables: ${var}, ${anything}
-          if (/^\$\{.*\}$/.test(path)) return false;
-          // Skip URL-encoded strings with %20 or other percent encoding
-          if (path.includes('%20') || path.includes('%3') || path.includes('%2')) return false;
-          // Skip data URIs: data:image/...
-          if (path.startsWith('data:')) return false;
-          // Skip base64-looking strings (long alphanumeric without extensions)
-          if (path.length > 30 && !/\.(png|jpg|jpeg|gif|webp|svg|pdf)$/i.test(path)) return false;
-          return true;
-        })
-        .sort((a, b) => b.matchIndex - a.matchIndex); // Sort reverse for string replacement
-        
-        if (allMatches.length > 0) {
-          const fileDir = path.dirname(filePath);
-          const fileBasename = path.basename(filePath, '.md');
-          
-          console.error(`\n🖼️  Found ${allMatches.length} images in ${path.basename(filePath)}`);
-          
-          // Process images (already sorted in reverse order)
-          for (const imageMatch of allMatches) {
-            const { fullMatch, imagePath, matchIndex } = imageMatch;
-            
-            // Skip URLs (http://, https://)
-            if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
-              continue;
-            }
-            
-            // Extract filename and strip Obsidian size specifier
-            let imageName = path.basename(imagePath);
-            imageName = imageName.split('|')[0]; // image.png|500 → image.png
-            
-            // Use vault-wide file map lookup (handles any organization structure)
-            const absoluteImagePath = imageMap.get(imageName);
-            
-            if (!absoluteImagePath) {
-              console.error(`   ⚠️  Not found: ${imageName}`);
-              stats.warnings++;
-              continue;
-            }
-            
-            console.error(`   ✓ OCR'ing: ${imageName}`);
-            
-            try {
-              // OCR the image
-              const imageChunks = await chunkImageWithDocling(absoluteImagePath, 512);
-              
-              if (imageChunks.length > 0) {
-                // Extract OCR text and inject inline
-                const ocrText = imageChunks.map(chunk => chunk.content).join(' ');
-                const replacement = `\n[Image OCR: ${ocrText}]\n`;
-                
-                // Replace image reference with OCR text
-                processedContent = 
-                  processedContent.slice(0, matchIndex) + 
-                  replacement + 
-                  processedContent.slice(matchIndex + fullMatch.length);
-              }
-            } catch (imageError) {
-              console.error(`⚠️  Could not OCR image ${imagePath} in ${filePath}:`, imageError);
-              stats.warnings++;
-            }
-          }
-        }
-        
-        // STEP 2: Write processed content to temp file for Docling
-        // Create unique temp directory in system temp location
-        const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'docling-'));
-        const tmpFile = path.join(tmpDir, path.basename(filePath));
-        await fs.writeFile(tmpFile, processedContent, 'utf-8');
-        
-        try {
-          // STEP 3: Chunk with Docling using processed content
-          const doclingChunks = await chunkWithDocling(tmpFile, 512);
-          
-          if (doclingChunks.length === 0) {
-            console.error(`⚠️  No chunks generated for: ${filePath}`);
-            return false;
-          }
-
-          // Create breadcrumb path for context
-          // Find vault root by looking for .obsidian folder
-          let currentDir = path.dirname(filePath);
-          let vaultRoot: string | null = null;
-          
-          for (let j = 0; j < 10; j++) {
-            try {
-              await fs.access(path.join(currentDir, '.obsidian'));
-              vaultRoot = currentDir;
-              break;
-            } catch {}
-            const parentDir = path.dirname(currentDir);
-            if (parentDir === currentDir) break;
-            currentDir = parentDir;
-          }
-          
-          // Build breadcrumb: relative/path/to/file (without .md extension)
-          let breadcrumb = '';
-          if (vaultRoot) {
-            const vaultName = path.basename(vaultRoot);
-            const relativePath = path.relative(vaultRoot, filePath);
-            const pathWithoutExt = relativePath.replace(/\.md$/, '');
-            breadcrumb = `${vaultName}/${pathWithoutExt}: `;
-          } else {
-            // Fallback: include indexing root folder + relative path
-            const rootFolderName = path.basename(indexingRoot);
-            const relativePath = path.relative(indexingRoot, filePath);
-            const pathWithoutExt = relativePath.replace(/\.md$/, '');
-            breadcrumb = `${rootFolderName}/${pathWithoutExt}: `;
-          }
-
-          // Store each chunk with breadcrumb context
-          for (let i = 0; i < doclingChunks.length; i++) {
-            const contentWithContext = `${breadcrumb}${doclingChunks[i].content}`;
-              
-            await vectorStorage.storeChunk(
-              entityName,
-              filePath,
-              contentWithContext,
-              i,
-              doclingChunks.length,
-              'document',
-              []
-            );
-          }
-        } finally {
-          // Clean up temp directory and file
-          try {
-            await fs.rm(tmpDir, { recursive: true, force: true });
-          } catch {}
-        }
-      } catch (error) {
-        // Fallback to simple chunking if Docling fails
-        console.error(`⚠️  Docling failed for ${filePath}, using simple chunking:`, error);
-        const fullContent = `# ${entityName}\n\n${content}`;
-        const chunks = chunkText(fullContent, { maxTokens: 512, overlap: 50 });
-        
-        for (let i = 0; i < chunks.length; i++) {
-          await vectorStorage.storeChunk(
-            entityName,
-            filePath,
-            chunks[i],
-            i,
-            chunks.length,
-            'document',
-            []
-          );
-        }
-      }
-    }
-
-    return true;
-  } catch (error) {
-    console.error(`❌ Failed to index ${filePath}:`, error);
-    return false;
-  }
-}
-
+/**
+ * Validate search quality by randomly selecting words from indexed files
+ * and checking if the source file appears in search results
+ */
 async function validateSearch(
   vectorStorage: VectorStorage,
-  indexedFiles: string[]
+  indexedFiles: string[],
+  stats: IndexStats
 ): Promise<void> {
   const MAX_RETRIES = 5;
   const crypto = await import('crypto');
@@ -355,9 +77,7 @@ async function validateSearch(
           for (const line of frontmatterLines) {
             if (line.match(/^tags:/i)) {
               inTagsSection = true;
-              // In YAML, tags: is just the key, values are on next lines with "- "
             } else if (inTagsSection && line.trim().startsWith('- ')) {
-              // Multi-line tags array
               const tag = line.trim().substring(2).trim();
               if (tag) frontmatterTags.push(tag);
             } else if (inTagsSection && !line.trim().startsWith('-')) {
@@ -373,22 +93,27 @@ async function validateSearch(
       // Combine tags + content for word extraction
       const fullText = [...frontmatterTags, contentText].join(' ');
       
-      // Remove HTML tags before word extraction (keep URLs)
+      // Remove HTML tags before word extraction
       const cleanedText = fullText.replace(/<[^>]+>/g, '');
       
-      // Extract words - strip edge punctuation only, min 2 chars
+      // Extract words - preserve @ for aliases, strip other edge punctuation
       const words = cleanedText
         .split(/\s+/)
-        .map(w => w.replace(/^[^\w]+|[^\w]+$/g, '')) // Strip edge punctuation only
-        .filter(w => w.length >= 2); // Minimum 2 chars per word
+        .map(w => {
+          // Preserve @ in middle of word (email/alias), but strip other edge punctuation
+          if (w.includes('@')) {
+            return w.replace(/^[^\w@]+|[^\w@]+$/g, '');
+          }
+          return w.replace(/^[^\w]+|[^\w]+$/g, '');
+        })
+        .filter(w => w.length >= 3);  // Min 3 chars (filter 2-letter words)
       
-      // Filter stop words (English + Portuguese) for better query specificity
-      const meaningfulWords = removeStopwords(words, [...eng, ...por]);
+      // Filter stop words + common verbs
+      const commonVerbs = ['add', 'put', 'get', 'set', 'use', 'run', 'try', 'see', 'go'];
+      const meaningfulWords = removeStopwords(words, [...eng, ...por, ...commonVerbs]);
       
       if (meaningfulWords.length < 3) {
-        if (attempt < MAX_RETRIES - 1) {
-          continue; // Try another file
-        }
+        if (attempt < MAX_RETRIES - 1) continue;
         console.log(`\n  🔍 Validation: skipped after ${MAX_RETRIES} attempts (insufficient meaningful words)`);
         return;
       }
@@ -396,94 +121,63 @@ async function validateSearch(
       // Add timestamp and filename entropy to randomization
       const seed = Date.now() + randomFile.length + attempt;
       
-      // Randomly select 2-3 consecutive words from meaningful words (no single-word queries)
+      // Randomly select 2-3 consecutive words
       const hash = crypto.createHash('sha256').update(String(seed)).digest();
-      const queryLength = 2 + (hash.readUInt8(0) % 2); // 2 or 3 words only
+      const queryLength = 2 + (hash.readUInt8(0) % 2);
       
       if (meaningfulWords.length < queryLength) {
-        if (attempt < MAX_RETRIES - 1) {
-          continue; // Try another file
-        }
+        if (attempt < MAX_RETRIES - 1) continue;
         console.log(`\n  🔍 Validation: skipped after ${MAX_RETRIES} attempts (insufficient words for query)`);
         return;
       }
       
       const maxIdx = Math.max(0, meaningfulWords.length - queryLength);
-      
-      // Use hash of seed for better distribution
-      const randomValue = hash.readUInt32BE(0) / 0xFFFFFFFF; // 0 to 1
+      const randomValue = hash.readUInt32BE(0) / 0xFFFFFFFF;
       const startIdx = maxIdx > 0 ? Math.floor(randomValue * (maxIdx + 1)) : 0;
       
       const selectedWords = meaningfulWords.slice(startIdx, startIdx + queryLength);
       const totalChars = selectedWords.join('').length;
       
-      // Validate char count - multi-word only now, total chars > 4
       if (totalChars <= 4) {
-        if (attempt < MAX_RETRIES - 1) {
-          continue; // Try another file
-        }
+        if (attempt < MAX_RETRIES - 1) continue;
         console.log(`\n  🔍 Validation: skipped after ${MAX_RETRIES} attempts (query too short)`);
         return;
       }
       
       const query = selectedWords.join(' ');
       
-      // Search vector DB - get ALL results to check if file appears anywhere
+      // Search vector DB
       const results = await vectorStorage.search(query, { maxResults: 100 });
       
-      // Check if source file appears ANYWHERE in results
+      // Check if source file appears in results
       const match = results.find(r => r.filePath === randomFile);
       const topSim = results[0]?.similarity || 0;
       const totalResults = results.length;
       
+      // Track validation stats
+      stats.validationAttempts++;
+      
       if (match) {
+        stats.validationSuccesses++;
         const rank = results.indexOf(match) + 1;
         console.log(`  🔍 Validation: "${query}" → ${entityName} found ✓ (sim: ${match.similarity.toFixed(2)}, rank ${rank}/${totalResults})`);
       } else {
         console.log(`  ⚠️  Validation: "${query}" → ${entityName} NOT FOUND in ${totalResults} results (best sim: ${topSim.toFixed(2)})`);
       }
       
-      return; // Success - exit retry loop
+      return;
       
     } catch (error) {
-      if (attempt < MAX_RETRIES - 1) {
-        continue; // Try another file
-      }
+      if (attempt < MAX_RETRIES - 1) continue;
       console.log(`\n  ⚠️  Validation failed after ${MAX_RETRIES} attempts: ${error}`);
       return;
     }
   }
 }
 
-async function getAllMarkdownFiles(dir: string): Promise<string[]> {
-  const files: string[] = [];
-  
-  async function scan(currentDir: string) {
-    const entries = await fs.readdir(currentDir, { withFileTypes: true });
-    
-    for (const entry of entries) {
-      const fullPath = path.join(currentDir, entry.name);
-      
-      // Skip hidden files and certain directories
-      if (entry.name.startsWith('.') || 
-          entry.name === 'node_modules' || 
-          entry.name === 'venv' ||
-          entry.name === '.git') {
-        continue;
-      }
-      
-      if (entry.isDirectory()) {
-        await scan(fullPath);
-      } else if (entry.isFile() && entry.name.endsWith('.md')) {
-        files.push(fullPath);
-      }
-    }
-  }
-  
-  await scan(dir);
-  return files;
-}
-
+/**
+ * Index all markdown files in a directory
+ */
 async function indexDirectory(
   memoryDir: string,
   options: { force?: boolean } = {}
@@ -496,30 +190,28 @@ async function indexDirectory(
     skipped: 0,
     failed: 0,
     warnings: 0,
-    errors: []
+    errors: [],
+    validationAttempts: 0,
+    validationSuccesses: 0
   };
 
   const vectorStorage = new VectorStorage();
 
   try {
-    // Build file map for entire vault (for image/PDF/etc resolution)
-    console.log('Building file map...');
-    const fileMap = await buildFileMap(memoryDir);
-    console.log(`Mapped ${fileMap.size} non-markdown files`);
-    
     // Get all markdown files recursively
     console.log('Scanning for markdown files...');
     const mdFiles = await getAllMarkdownFiles(memoryDir);
     
     stats.total = mdFiles.length;
-    const validationInterval = 10; // Validate every 10 files
+    const validationInterval = 10;
     console.log(`Found ${stats.total} markdown files (validating every ${validationInterval} files)\n`);
 
     // Index files with progress and validation
     for (let i = 0; i < mdFiles.length; i++) {
       const filePath = mdFiles[i];
       
-      const success = await indexFile(vectorStorage, filePath, memoryDir, fileMap, stats);
+      // Use shared indexing pipeline
+      const success = await indexFile(vectorStorage, filePath, memoryDir);
       
       if (success) {
         stats.indexed++;
@@ -532,11 +224,11 @@ async function indexDirectory(
         });
       }
       
-      // Inline validation every N files - test files from LAST interval only
+      // Inline validation every N files
       if ((i + 1) % validationInterval === 0 && stats.indexed > 0) {
         const startIdx = Math.max(0, i + 1 - validationInterval);
         const recentFiles = mdFiles.slice(startIdx, i + 1);
-        await validateSearch(vectorStorage, recentFiles);
+        await validateSearch(vectorStorage, recentFiles, stats);
       }
     }
 
@@ -550,6 +242,9 @@ async function indexDirectory(
   return stats;
 }
 
+/**
+ * Main entry point
+ */
 async function main() {
   const args = process.argv.slice(2);
   
@@ -608,6 +303,11 @@ Examples:
   console.log(`   ⏭️  Skipped: ${stats.skipped}`);
   console.log(`   ⚠️  Warnings: ${stats.warnings}`);
   console.log(`   ❌ Failed: ${stats.failed}`);
+  
+  if (stats.validationAttempts > 0) {
+    const successRate = ((stats.validationSuccesses / stats.validationAttempts) * 100).toFixed(1);
+    console.log(`   🔍 Validation: ${stats.validationSuccesses}/${stats.validationAttempts} found (${successRate}%)`);
+  }
 
   if (stats.errors.length > 0) {
     console.log('\n❌ Errors:');

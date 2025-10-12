@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sibagy.obsidian-indexer</string>
+    
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/sibagy/.nvm/versions/node/v23.6.1/bin/node</string>
+        <string>/Users/sibagy/fileZ/projZ/SIbagyPersonal/ai/memory/obsidian-memory-mcp/dist/standalone-watcher.js</string>
+    </array>
+    
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DATABASE_URL</key>
+        <string>postgresql://localhost:5432/obsidian_memory</string>
+        <key>VAULT_WORK</key>
+        <string>/Users/sibagy/fileZ/obsidian/work</string>
+        <key>VAULT_PERSONAL</key>
+        <string>/Users/sibagy/fileZ/obsidian/personal</string>
+        <key>FILE_WATCH_DEBOUNCE_MS</key>
+        <string>60000</string>
+        <key>LOG_LEVEL</key>
+        <string>debug</string>
+        <key>DAEMON_LOG_FILE</key>
+        <string>/tmp/obsidian-indexer.log</string>
+    </dict>
+    
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <key>KeepAlive</key>
+    <true/>
+    
+    <key>StandardOutPath</key>
+    <string>/tmp/obsidian-indexer.log</string>
+    
+    <key>StandardErrorPath</key>
+    <string>/tmp/obsidian-indexer.error.log</string>
+    
+    <key>WorkingDirectory</key>
+    <string>/Users/sibagy/fileZ/projZ/SIbagyPersonal/ai/memory/obsidian-memory-mcp</string>
+</dict>
+</plist>

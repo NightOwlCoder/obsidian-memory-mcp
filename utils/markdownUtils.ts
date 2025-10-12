@@ -1,13 +1,13 @@
 import matter from 'gray-matter';
 import { Entity, Relation } from '../types.js';
 
-interface MarkdownMetadata {
+export interface MarkdownMetadata {
   entityType: string;
   created?: string;
   updated?: string;
 }
 
-interface ParsedMarkdown {
+export interface ParsedMarkdown {
   metadata: MarkdownMetadata;
   name: string;
   observations: string[];
