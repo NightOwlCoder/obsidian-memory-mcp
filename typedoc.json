@@ -1,0 +1,28 @@
+{
+  "entryPoints": [
+    "index.ts",
+    "storage/MarkdownStorageManager.ts",
+    "storage/VectorStorage.ts",
+    "types.ts"
+  ],
+  "out": "docs/api",
+  "plugin": ["typedoc-plugin-markdown"],
+  "readme": "none",
+  "githubPages": false,
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "excludeInternal": true,
+  "name": "Obsidian Memory MCP - API Reference",
+  "includeVersion": true,
+  "categorizeByGroup": true,
+  "categoryOrder": [
+    "Core",
+    "Storage",
+    "Utilities",
+    "*"
+  ],
+  "navigationLinks": {
+    "GitHub": "https://github.com/YuNaga224/obsidian-memory-mcp",
+    "User Guides": "../guides/"
+  }
+}
