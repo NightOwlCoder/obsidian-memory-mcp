@@ -29,6 +29,21 @@ export async function chunkWithDocling(
     
     let output = '';
     let errorOutput = '';
+    let settled = false;
+    
+    const cleanup = () => {
+      if (!settled) {
+        settled = true;
+        if (!python.killed) {
+          python.kill();
+        }
+      }
+    };
+    
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('Docling chunker timeout (30s)'));
+    }, 30000);
     
     python.stdout.on('data', (data) => { 
       output += data.toString(); 
@@ -39,6 +54,12 @@ export async function chunkWithDocling(
     });
     
     python.on('close', (code) => {
+      clearTimeout(timeout);
+      cleanup();
+      
+      if (settled) return; // Already rejected
+      settled = true;
+      
       if (code !== 0) {
         reject(new Error(`Docling chunker failed: ${errorOutput}`));
         return;
@@ -59,7 +80,12 @@ export async function chunkWithDocling(
     });
     
     python.on('error', (err) => {
-      reject(new Error(`Failed to spawn Docling process: ${err}`));
+      clearTimeout(timeout);
+      cleanup();
+      if (!settled) {
+        settled = true;
+        reject(new Error(`Failed to spawn Docling process: ${err}`));
+      }
     });
   });
 }
@@ -86,6 +112,21 @@ export async function chunkImageWithDocling(
     
     let output = '';
     let errorOutput = '';
+    let settled = false;
+    
+    const cleanup = () => {
+      if (!settled) {
+        settled = true;
+        if (!python.killed) {
+          python.kill();
+        }
+      }
+    };
+    
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('Docling image OCR timeout (30s)'));
+    }, 30000);
     
     python.stdout.on('data', (data) => { 
       output += data.toString(); 
@@ -96,6 +137,12 @@ export async function chunkImageWithDocling(
     });
     
     python.on('close', (code) => {
+      clearTimeout(timeout);
+      cleanup();
+      
+      if (settled) return; // Already rejected
+      settled = true;
+      
       if (code !== 0) {
         reject(new Error(`Docling image OCR failed: ${errorOutput}`));
         return;
@@ -116,7 +163,12 @@ export async function chunkImageWithDocling(
     });
     
     python.on('error', (err) => {
-      reject(new Error(`Failed to spawn Docling process: ${err}`));
+      clearTimeout(timeout);
+      cleanup();
+      if (!settled) {
+        settled = true;
+        reject(new Error(`Failed to spawn Docling process: ${err}`));
+      }
     });
   });
 }

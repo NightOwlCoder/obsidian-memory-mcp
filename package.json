@@ -32,10 +32,13 @@
     "daemon": "node dist/standalone-watcher.js",
     "index": "tsx scripts/index.ts",
     "stats": "tsx scripts/stats.ts",
-    "reindex": "tsx scripts/index.ts --force"
+    "reindex": "tsx scripts/index.ts --force",
+    "docs": "typedoc",
+    "docs:watch": "typedoc --watch",
+    "docs:serve": "npx http-server docs/api -p 8080"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.0.1",
+    "@modelcontextprotocol/sdk": "^1.20.0",
     "@types/pg": "^8.15.5",
     "chokidar": "^4.0.3",
     "gray-matter": "^4.0.3",
@@ -49,6 +52,8 @@
     "@types/stopword": "^2.0.3",
     "shx": "^0.3.4",
     "tsx": "^4.20.6",
+    "typedoc": "^0.28.14",
+    "typedoc-plugin-markdown": "^4.9.0",
     "typescript": "^5.6.2"
   }
 }

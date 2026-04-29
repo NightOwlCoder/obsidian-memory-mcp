@@ -16,6 +16,7 @@
 
 import { FileWatcher } from './watcher/FileWatcher.js';
 import { VectorStorage } from './storage/VectorStorage.js';
+import { getMemoryRoot, isMemoryInsideVault } from './utils/memoryRoot.js';
 import { daemonLogger as logger } from './utils/logger.js';
 
 async function main() {
@@ -31,9 +32,15 @@ async function main() {
   const vaultPersonal = process.env.VAULT_PERSONAL;
   const debounceMs = parseInt(process.env.FILE_WATCH_DEBOUNCE_MS || '60000');
   
+  // Get memory configuration
+  const memoryRoot = getMemoryRoot();
+  const memoryInVault = isMemoryInsideVault();
+  
   logger.info('Configuration:');
   logger.info('  Vault (Work): ' + (vaultWork || '(not configured)'));
   logger.info('  Vault (Personal): ' + (vaultPersonal || '(not configured)'));
+  logger.info('  Memory Root: ' + memoryRoot);
+  logger.info('  Memory Location: ' + (memoryInVault ? 'inside vault' : 'separate directory'));
   logger.info('  Debounce: ' + (debounceMs / 1000) + ' seconds');
   logger.info('  Database: ' + (process.env.DATABASE_URL || 'default'));
   logger.info('  Log Level: ' + (process.env.LOG_LEVEL || 'info'));
@@ -45,13 +52,27 @@ async function main() {
   }
   
   try {
-    // Start watching configured vaults
-    logger.info('Starting watchers...');
-    if (vaultWork) {
-      watcher.watch(vaultWork);
-    }
+    // Build watch paths list
+    const watchPaths: string[] = [];
+    
+    // Always watch configured vaults
     if (vaultPersonal) {
-      watcher.watch(vaultPersonal);
+      watchPaths.push(vaultPersonal);
+    }
+    if (vaultWork) {
+      watchPaths.push(vaultWork);
+    }
+    
+    // Add memory root only if outside vaults (avoid duplicate watch)
+    if (!memoryInVault) {
+      watchPaths.push(memoryRoot);
+      logger.info('  Watching separate memory: ' + memoryRoot);
+    }
+    
+    // Start watching all paths
+    logger.info('Starting watchers...');
+    for (const watchPath of watchPaths) {
+      watcher.watch(watchPath);
     }
     
     logger.info('='.repeat(60));
@@ -72,6 +93,8 @@ async function main() {
     await watcher.close();
     logger.info('Closing database connection...');
     await vectorStorage.close();
+    logger.info('Shutting down embedder...');
+    VectorStorage.shutdownEmbedder();
     logger.info('✓ Daemon stopped');
     process.exit(0);
   };

@@ -1,6 +1,7 @@
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import { getMemoryRoot } from './memoryRoot.js';
 
 // Obsidian and file system forbidden characters
 const FORBIDDEN_CHARS = /[<>:"/\\|?*\x00-\x1f]/g;
@@ -38,17 +39,10 @@ export function sanitizeFilename(name: string): string {
 
 /**
  * Get the memory directory path
+ * Delegates to getMemoryRoot() for consistent memory location logic
  */
 export function getMemoryDir(): string {
-  // Allow override via environment variable
-  if (process.env.MEMORY_DIR) {
-    return path.isAbsolute(process.env.MEMORY_DIR)
-      ? process.env.MEMORY_DIR
-      : path.resolve(process.cwd(), process.env.MEMORY_DIR);
-  }
-  
-  // Default to ./memory in the current working directory
-  return path.resolve(process.cwd(), 'memory');
+  return getMemoryRoot();
 }
 
 /**
@@ -74,7 +68,7 @@ export function getEntityNameFromPath(filePath: string): string | null {
  * Check if a path is within the memory directory
  */
 export function isInMemoryDir(filePath: string): boolean {
-  const memoryDir = getMemoryDir();
+  const memoryRoot = getMemoryRoot();
   const resolved = path.resolve(filePath);
-  return resolved.startsWith(memoryDir);
+  return resolved.startsWith(memoryRoot);
 }

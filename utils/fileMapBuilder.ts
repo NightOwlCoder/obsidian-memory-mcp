@@ -1,5 +1,6 @@
 import { promises as fs } from 'fs';
 import path from 'path';
+import { getMemoryRoot, isMemoryInsideVault } from './memoryRoot.js';
 
 /**
  * Build filename → filepath map for entire vault (all file types)
@@ -39,6 +40,39 @@ export async function buildFileMap(rootDir: string): Promise<Map<string, string>
   
   await scan(rootDir);
   return fileMap;
+}
+
+/**
+ * Build file maps for all watched directories
+ * Avoids duplicate scans if memory root is inside a vault
+ * 
+ * @returns Map of filename to absolute path for all non-markdown files
+ */
+export async function buildAllFileMaps(): Promise<Map<string, string>> {
+  const allFiles = new Map<string, string>();
+  
+  // Scan personal vault (priority)
+  const vaultPersonal = process.env.VAULT_PERSONAL;
+  if (vaultPersonal) {
+    const personalFiles = await buildFileMap(vaultPersonal);
+    personalFiles.forEach((filePath, filename) => allFiles.set(filename, filePath));
+  }
+  
+  // Scan work vault
+  const vaultWork = process.env.VAULT_WORK;
+  if (vaultWork) {
+    const workFiles = await buildFileMap(vaultWork);
+    workFiles.forEach((filePath, filename) => allFiles.set(filename, filePath));
+  }
+  
+  // Scan memory root only if outside vaults (avoid duplicate scan)
+  if (!isMemoryInsideVault()) {
+    const memoryRoot = getMemoryRoot();
+    const memoryFiles = await buildFileMap(memoryRoot);
+    memoryFiles.forEach((filePath, filename) => allFiles.set(filename, filePath));
+  }
+  
+  return allFiles;
 }
 
 /**

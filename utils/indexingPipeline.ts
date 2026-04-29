@@ -1,5 +1,6 @@
 import { VectorStorage } from '../storage/VectorStorage.js';
 import { getEntityNameFromPath } from './pathUtils.js';
+import { getMemoryRoot } from './memoryRoot.js';
 import { indexMemoryEntity } from './memoryEntityIndexer.js';
 import { indexVaultNote } from './vaultNoteIndexer.js';
 import { buildFileMap } from './fileMapBuilder.js';
@@ -44,7 +45,8 @@ export async function indexFile(
     }
     
     // Determine file type and route to appropriate indexer
-    const isMemoryEntity = filePath.includes('/memory/');
+    const memoryRoot = getMemoryRoot();
+    const isMemoryEntity = filePath.startsWith(memoryRoot);
     
     if (isMemoryEntity) {
       // MEMORY ENTITY: Use observation-level + relation-level chunking

@@ -5,6 +5,8 @@ export interface MarkdownMetadata {
   entityType: string;
   created?: string;
   updated?: string;
+  canonicalName?: string;
+  aliases?: string[];
 }
 
 export interface ParsedMarkdown {

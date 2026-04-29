@@ -8,7 +8,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/Users/sibagy/.nvm/versions/node/v23.6.1/bin/node</string>
-        <string>/Users/sibagy/fileZ/projZ/SIbagyPersonal/ai/memory/obsidian-memory-mcp/dist/standalone-watcher.js</string>
+        <string>/Users/sibagy/fileZ/projZ/SIbagyPersonal/projZ/obsidian-memory-mcp/dist/standalone-watcher.js</string>
     </array>
     
     <key>EnvironmentVariables</key>
@@ -40,6 +40,6 @@
     <string>/tmp/obsidian-indexer.error.log</string>
     
     <key>WorkingDirectory</key>
-    <string>/Users/sibagy/fileZ/projZ/SIbagyPersonal/ai/memory/obsidian-memory-mcp</string>
+    <string>/Users/sibagy/fileZ/projZ/SIbagyPersonal/projZ/obsidian-memory-mcp</string>
 </dict>
 </plist>
